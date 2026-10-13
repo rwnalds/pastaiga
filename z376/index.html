@@ -58,7 +58,7 @@ const isTouch=matchMedia('(pointer:coarse)').matches;
 // ---------- renderer / scene ----------
 const canvas=document.getElementById('c');
 let renderer;
-try{renderer=new THREE.WebGLRenderer({canvas,antialias:true});}catch(e){document.getElementById('err').style.display='flex';throw e;}
+try{renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});}catch(e){document.getElementById('err').style.display='flex';throw e;}
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.shadowMap.autoUpdate=false; // static scene: re-render shadows only on change
@@ -67,14 +67,16 @@ renderer.outputColorSpace=THREE.SRGBColorSpace;
 const scene=new THREE.Scene();
 const camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.05,400);
 camera.rotation.order='YXZ';
-const DAYSKY=0x9cc4e4, NIGHTSKY=0x0d1626;
-scene.background=new THREE.Color(DAYSKY);scene.fog=new THREE.Fog(DAYSKY,40,140);
+// sky is a CSS gradient behind a transparent canvas; fog matches its horizon colour
+const DAYSKY=0xf2dcc2, NIGHTSKY=0x0d1626;
+const SKY={day:'linear-gradient(#7fb0dc 0%,#a9c9e6 45%,#f2dcc2 72%)',night:'linear-gradient(#050a14 0%,#0d1626 70%)'};
+canvas.style.background=SKY.day;scene.fog=new THREE.Fog(DAYSKY,45,150);
 
 // image-based fill light: gives surfaces direction-dependent shading instead of flat ambient
 const envTex=new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(),.04).texture;scene.environment=envTex;
-const hemi=new THREE.HemisphereLight(0xe8f2ff,0xb8a88f,.55);scene.add(hemi);
-const amb=new THREE.AmbientLight(0xfff8ee,.08);scene.add(amb);
-const sun=new THREE.DirectionalLight(0xfff0d8,2.6);sun.position.set(-14,26,22);sun.target.position.set(0,0,0);
+const hemi=new THREE.HemisphereLight(0xffe9cc,0xe6d2b5,.5);scene.add(hemi);   // warm sky, warm floor bounce
+const amb=new THREE.AmbientLight(0xffe3c4,.06);scene.add(amb);
+const sun=new THREE.DirectionalLight(0xffc98a,6.5);sun.position.set(-20,13,16);  // low golden-hour sun from the south-west: long light patches indoorssun.target.position.set(0,0,0);
 sun.castShadow=true;sun.shadow.mapSize.set(isTouch?1024:2048,isTouch?1024:2048);
 Object.assign(sun.shadow.camera,{left:-22,right:22,top:22,bottom:-22,near:1,far:80});sun.shadow.bias=-.0004;sun.shadow.normalBias=.02;
 scene.add(sun,sun.target);
@@ -162,6 +164,7 @@ const M={
 const colliders=[];   // [minx,minz,maxx,maxz] metres
 const mapWalls=[];    // plan-pixel rects for the minimap
 const solids=[];      // solid wall segments (plan px), for skirting and wall cladding
+const lintels=[];     // wall above doors/windows (plan px): reaches the ceiling, so ceiling shading continues over it
 // BoxGeometry UVs run 0..1 per face; scale them to metres (faces: +x,-x,+y,-y,+z,-z)
 function boxUV(g,w,h,d){const uv=g.attributes.uv,dim=[[d,h],[d,h],[w,d],[w,d],[w,h],[w,h]];for(let i=0;i<uv.count;i++){const [a,b]=dim[Math.floor(i/4)];uv.setXY(i,uv.getX(i)*a,uv.getY(i)*b);}return g;}
 function mbox(x0,z0,x1,z1,y0,y1,m,o={}){
@@ -204,7 +207,7 @@ function buildWall(w){
   let cur=a0;
   for(const o of (w.o||[]).slice().sort((p,q)=>p[0]-q[0])){
     const [s,e,t]=o;solid(cur,s);
-    if(t==='win'){const sill=o[3]??.9,head=o[4]??2.2;seg(s,e,0,sill,M.wall,true);seg(s,e,head,Hh);
+    if(t==='win'){const sill=o[3]??.9,head=o[4]??2.2;seg(s,e,0,sill,M.wall,true);seg(s,e,head,Hh);lintels.push({r:rect(s,e),horiz});
       const r=rect(s,e),mid=(b0+b1)/2,f=.06;
       if(horiz){const z0=Z(mid)-.04,z1=Z(mid)+.04,xa=X(s),xb=X(e);
         mbox(xa,z0,xb,z1,sill,sill+f,M.frame);mbox(xa,z0,xb,z1,head-f,head,M.frame);mbox(xa,z0,xa+f,z1,sill,head,M.frame);mbox(xb-f,z0,xb,z1,sill,head,M.frame);
@@ -219,7 +222,7 @@ function buildWall(w){
       if(sill<1.0)curtains(s,e,head);
       mapWalls.push({win:rect(s,e)});
     }else{ // door, glass, front
-      const head=t==='glass'?2.3:t==='front'?2.2:2.05;seg(s,e,head,Hh);if(t==='glass')curtains(s,e,head);else casing(s,e,head);
+      const head=t==='glass'?2.3:t==='front'?2.2:2.05;seg(s,e,head,Hh);lintels.push({r:rect(s,e),horiz});if(t==='glass')curtains(s,e,head);else casing(s,e,head);
       const side=o[3]||1, hinge=o[4]||'a', mid=(b0+b1)/2, width=(e-s)/S;
       const hx=horiz?X(hinge==='a'?s:e):X(mid), hz=horiz?Z(mid):Z(hinge==='a'?s:e);
       const dx=horiz?(hinge==='a'?1:-1):0, dz=horiz?0:(hinge==='a'?1:-1);
@@ -288,13 +291,13 @@ function quad(a0,a1,b0,b1,m){ // a = dark edge (v=0), b = faded edge (v=1)
   g.setAttribute('uv',new THREE.Float32BufferAttribute([0,0,1,0,1,1,0,0,1,1,0,1],2));g.computeVertexNormals();
   const me=new THREE.Mesh(g,m);me.renderOrder=1;scene.add(me);return me;}
 function contactShade(rr,side){const [a,b,c,d]=rr,tol=3,W=.35,eps=.024,H2=IN_H-.004;
-  for(const s of solids){const [p0,q0,p1,q1]=s.r;let lo,hi,P;
+  for(const s of [...solids,...lintels.map(l=>({...l,top:true}))]){const [p0,q0,p1,q1]=s.r;let lo,hi,P;
     if(side==='n'||side==='s'){if(!s.horiz)continue;const line=side==='n'?b:d;if(Math.abs((side==='n'?q1:q0)-line)>tol)continue;
       lo=Math.max(a,p0);hi=Math.min(c,p1);if(hi-lo<2)continue;const sg=side==='n'?1:-1,z=Z(line)+sg*eps;P=(u,y,o)=>[X(u),y,z+sg*o];}
     else{if(s.horiz)continue;const line=side==='w'?a:c;if(Math.abs((side==='w'?p1:p0)-line)>tol)continue;
       lo=Math.max(b,q0);hi=Math.min(d,q1);if(hi-lo<2)continue;const sg=side==='w'?1:-1,x=X(line)+sg*eps;P=(u,y,o)=>[x+sg*o,y,Z(u)];}
-    quad(P(lo,.012,0),P(hi,.012,0),P(lo,.012,W),P(hi,.012,W),M_EDGE);   // floor along the wall
-    quad(P(lo,0,0),P(hi,0,0),P(lo,.45,0),P(hi,.45,0),M_EDGE);          // wall above the floor
+    if(!s.top){quad(P(lo,.012,0),P(hi,.012,0),P(lo,.012,W),P(hi,.012,W),M_EDGE);   // floor along the wall
+    quad(P(lo,0,0),P(hi,0,0),P(lo,.45,0),P(hi,.45,0),M_EDGE);}         // wall above the floor (not across openings)
     quad(P(lo,IN_H,0),P(hi,IN_H,0),P(lo,IN_H-.35,0),P(hi,IN_H-.35,0),M_EDGE); // wall under the ceiling
     quad(P(lo,H2,0),P(hi,H2,0),P(lo,H2,W),P(hi,H2,W),M_EDGE);}}         // ceiling along the wall
 for(const r of H.rooms)for(const rr of r.r)for(const sd of 'nswe')contactShade(rr,sd);
@@ -452,10 +455,10 @@ const O=H.outside||{};
 const roofGroup=new THREE.Group();scene.add(roofGroup);
 const ground=mplane(-120,-120,120,120,-.03,tm(TX.grass,60,60,{roughness:1}));
 if(O.terrace){const [a,b,c,d]=O.terrace;pbox(a,b,c,d,-.2,-.005,tm(TX.deck,1/1.2,1/1.2),{cast:false});}
-if(O.canopy){const [a,b,c,d]=O.canopy;pbox(a,b,c,d,2.62,2.86,M.dark,{parent:roofGroup});
+if(O.canopy){const [a,b,c,d]=O.canopy;pbox(a,b,c,d,2.62,2.86,M.dark,{parent:roofGroup});pbox(a+3,b+3,c-3,d-3,2.6,2.62,M.cladWood,{parent:roofGroup,cast:false}); // timber soffit
   for(const [px,py] of O.posts||[])pbox(px-12,py-12,px+12,py+12,0,2.62,M.cladWood,{col:true});}
 if(O.stoop){const [a,b,c,d]=O.stoop;pbox(a,b,c,d,-.2,-.01,tm(TX.paving,1,1),{cast:false});}
-if(O.entryCanopy){const [a,b,c,d]=O.entryCanopy;pbox(a,b,c,d,2.5,2.72,M.dark,{parent:roofGroup});}
+if(O.entryCanopy){const [a,b,c,d]=O.entryCanopy;pbox(a,b,c,d,2.5,2.72,M.dark,{parent:roofGroup});pbox(a+3,b+3,c-3,d-3,2.48,2.5,M.cladWood,{parent:roofGroup,cast:false});}
 if(O.path){const [a,b,c,d]=O.path;mplane(X(a),Z(b),X(c),Z(d),-.012,tm(TX.paving,(c-a)/S,(d-b)/S));}
 for(const h of O.hedges||[]){const [a,b,c,d]=h;pbox(a,b,c,d,0,.65,M.leaf,{col:true});}
 // gravel border + ornamental grass round the house
@@ -528,7 +531,8 @@ function blocked(x,z){for(const [a,b,c,d] of colliders)if(x>a-RAD&&x<c+RAD&&z>b-
 function move(dt){let f=0,s=0;
   if(keys.KeyW||keys.ArrowUp)f+=1;if(keys.KeyS||keys.ArrowDown)f-=1;if(keys.KeyD||keys.ArrowRight)s+=1;if(keys.KeyA||keys.ArrowLeft)s-=1;
   f-=jv[1];s+=jv[0];const l=Math.hypot(f,s);if(l<.05)return;if(l>1){f/=l;s/=l;}
-  const sp=(keys.ShiftLeft||keys.ShiftRight?4.5:2.2)*dt,sy=Math.sin(player.yaw),cy=Math.cos(player.yaw);
+  // real indoor walking pace (m/s); faster makes rooms feel small
+  const sp=(keys.ShiftLeft||keys.ShiftRight?2.8:1.4)*dt,sy=Math.sin(player.yaw),cy=Math.cos(player.yaw);
   const dx=(-sy*f+cy*s)*sp,dz=(-cy*f-sy*s)*sp;
   if(!blocked(player.x+dx,player.z))player.x+=dx;if(!blocked(player.x,player.z+dz))player.z+=dz;
   player.x=Math.max(-60,Math.min(60,player.x));player.z=Math.max(-60,Math.min(60,player.z));}
@@ -542,10 +546,10 @@ function setBird(v){bird=v;renderer.shadowMap.needsUpdate=true;roofGroup.visible
 
 // ---------- day / night ----------
 let night=false;
-function setNight(v){night=v;renderer.shadowMap.needsUpdate=true;scene.environment=v?null:envTex;scene.background.set(v?NIGHTSKY:DAYSKY);scene.fog.color.set(v?NIGHTSKY:DAYSKY);
-  hemi.intensity=v?.12:1.15;amb.intensity=v?.06:.85;sun.intensity=v?.18:2.6;sun.color.set(v?0x8fa6d8:0xfff0d8);
+function setNight(v){night=v;renderer.shadowMap.needsUpdate=true;scene.environment=v?null:envTex;canvas.style.background=v?SKY.night:SKY.day;scene.fog.color.set(v?NIGHTSKY:DAYSKY);
+  hemi.intensity=v?.12:.5;amb.intensity=v?.06:.06;sun.intensity=v?.18:6.5;sun.color.set(v?0x8fa6d8:0xffc98a);
   for(const l of roomLights){l.visible=v;l.intensity=v?9:0;}M.lamp.emissiveIntensity=v?2.2:.2;M.fire.emissiveIntensity=v?3:.6;
-  renderer.toneMappingExposure=v?1.25:.95;const b=document.getElementById('bNight');b.textContent=v?U.night:U.day;b.classList.toggle('on',v);}
+  renderer.toneMappingExposure=v?1.25:1.12;const b=document.getElementById('bNight');b.textContent=v?U.night:U.day;b.classList.toggle('on',v);}
 
 // ---------- buttons ----------
 const bar=document.getElementById('bar');
@@ -581,6 +585,7 @@ function mergeStatic(root,skip=[]){root.updateMatrixWorld(true);const buckets=ne
       if(!g.attributes.uv)continue;g.applyMatrix4(ch.matrixWorld);b.g.push(g);kill.push(ch);}else visit(ch);}};
   visit(root);for(const ch of kill)ch.parent.remove(ch);
   for(const b of buckets.values()){const me=new THREE.Mesh(mergeGeometries(b.g,false),b.m);me.castShadow=b.cast;me.receiveShadow=true;root.add(me);}}
+scene.traverse(o=>{if(o.material&&o.material.isMeshStandardMaterial&&o.material!==M.mirror)o.material.envMapIntensity=.3;});
 mergeStatic(scene,[roofGroup,ceilGroup,marker]);mergeStatic(roofGroup);mergeStatic(ceilGroup);
 renderer.shadowMap.needsUpdate=true;
 // adaptive quality: if the first seconds run slow, drop AO, then resolution
